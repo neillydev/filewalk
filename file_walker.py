@@ -700,7 +700,8 @@ def main(argv=None) -> int:
         file = u["file"]
         pos = u["pos"]
         fdef = find_enclosing_function(idx, file, pos)
-        chains = []
+        chains: List[Dict[str, List[str]]] = []
+
         if fdef:
             traces = backtrace_to_endpoints(
                 idx, fdef, caller_map, handler_map, max_depth=ns.max_depth
@@ -730,7 +731,7 @@ def main(argv=None) -> int:
         report.append(rec)
 
         if ns.json:
-            out.write_ndjson_obj(rec)
+            out.write_ndjson_obj(rec)  # stream JSON record
         else:
             sec = []
             sec.append(f"\nPROC: {rec['procedure']}\n")
