@@ -584,6 +584,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument(
         "--max-depth", type=int, default=5, help="Max backtrace depth (default 5)"
     )
+    ap.add_argument("--debug", action="store_true", help="Print debug counters")
     return ap.parse_args(argv)
 
 
@@ -633,10 +634,26 @@ def main(argv=None) -> int:
             continue
         idx.index_file(path, code)
     idx.finalize_calls()
+    if ns.debug:
+        total_funcs = sum(len(v) for v in idx.functions_by_file.values())
+        print(
+            f"[debug] files scanned: {len(list(walk_files(ns.root, exts)))}",
+            file=sys.stderr,
+        )
+        print(f"[debug] functions indexed: {total_funcs}", file=sys.stderr)
+        print(f"[debug] endpoints indexed: {len(idx.koa_endpoints)}", file=sys.stderr)
+        print(f"[debug] procs considered: {len(procs)}", file=sys.stderr)
+    usages = scan_proc_usages(ns.root, exts, procs)
+    if ns.debug:
+        print(f"[debug] proc usages found: {len(usages)}", file=sys.stderr)
+        for u in usages[:5]:
+            print(
+                f"[debug] hit: {u['file']}:{u['line']} -> {u['snippet']}",
+                file=sys.stderr,
+            )
 
     caller_map = build_caller_map(idx)
     handler_map = match_handlers_to_functions(idx)
-    usages = scan_proc_usages(ns.root, exts, procs)
 
     report: List[Dict] = []
     gv_edges: List[Tuple[str, str]] = []
