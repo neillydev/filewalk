@@ -6,6 +6,7 @@ import re
 import sys
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Set, Tuple
+from datetime import datetime
 
 FILE_EXT_DEFAULT = (".ts", ".tsx", ".js", ".jsx")
 
@@ -87,31 +88,26 @@ def find_string_spans(code: str) -> List[Tuple[int, int, str]]:
     return spans
 
 
-# function foo(...) { ... }
 RE_FUNC_DECL = re.compile(
     r"(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z0-9_$]+)\s*\(", re.MULTILINE
 )
 
-# const|let|var foo = (...) : ReturnType => ...
 RE_FUNC_ARROW = re.compile(
     r"(?:export\s+)?(?:const|let|var)\s+"
     r"(?P<name>[A-Za-z0-9_$]+)\s*=\s*"
     r"(?:async\s*)?"
-    r"\([^()]*\)\s*"  # params (...)
-    r"(?::\s*[^=(){;]+)?\s*"  # optional TS return type like : Promise<Row>
+    r"\([^()]*\)\s*"
+    r"(?::\s*[^=(){;]+)?\s*"
     r"=>",
     re.MULTILINE,
 )
 
-# class ClassName { ... }
 RE_CLASS = re.compile(r"class\s+(?P<cls>[A-Za-z0-9_$]+)\s*", re.MULTILINE)
 
-# methodName(...) {
 RE_METHOD_SIG = re.compile(
     r"^\s*(?P<name>[A-Za-z0-9_$]+)\s*\([^()]*\)\s*\{", re.MULTILINE
 )
 
-# imports / exports (names only)
 RE_IMPORT_NAMED = re.compile(
     r"import\s*{\s*([^}]+)\s*}\s*from\s*['\"][^'\"]+['\"]", re.MULTILINE
 )
@@ -120,25 +116,21 @@ RE_EXPORT_FUNC_DECL = re.compile(
     r"export\s+(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(", re.MULTILINE
 )
 
-# Router variable with prefix
 RE_KOA_ROUTER_PREFIX = re.compile(
     r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+Router\s*\(\s*{[^}]*\bprefix\s*:\s*(['\"])(?P<prefix>[^'\"]+)\1",
     re.DOTALL,
 )
 
-# Standalone routes: obj.get('/p', handlers...)
 RE_KOA_ROUTE_CALL = re.compile(
     r"\b(?P<obj>[A-Za-z_][A-Za-z0-9_]*)\.(?P<method>get|post|put|patch|delete|all)\s*\(\s*(?P<path>['\"][^'\"]+['\"])\s*,\s*(?P<rest>[^)]*)\)",
     re.IGNORECASE | re.DOTALL,
 )
 
-# Chain start: obj . method ( '/p', handlers... )
 RE_KOA_CHAIN_START = re.compile(
     r"\b(?P<obj>[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*(?P<method>get|post|put|patch|delete|all)\s*\(\s*(?P<path>['\"][^'\"]+['\"])\s*,\s*(?P<rest>[^)]*)\)",
     re.IGNORECASE | re.DOTALL,
 )
 
-# Chain follow: .method('/p', handlers...)
 RE_KOA_CHAIN_FOLLOW = re.compile(
     r"\s*\.\s*(?P<method>get|post|put|patch|delete|all)\s*\(\s*(?P<path>['\"][^'\"]+['\"])\s*,\s*(?P<rest>[^)]*)\)",
     re.IGNORECASE | re.DOTALL,
@@ -375,9 +367,6 @@ class CodeIndex:
         return n
 
 
-# ------------------------------ detection utils -------------------------------
-
-
 def extract_handler_names(arglist: str) -> List[str]:
     cleaned = re.sub(
         r"$begin:math:display$[^$end:math:display$]*\]",
@@ -450,7 +439,7 @@ def scan_proc_usages(root: str, exts: Tuple[str, ...], procs: List[str]) -> List
                     snippet = code[ls:le].strip()
                     hits.append(
                         {
-                            "file": path,  # already absolute from walk_files()
+                            "file": path,
                             "line": line,
                             "pos": abs_pos,
                             "proc": pname,
@@ -502,7 +491,6 @@ def match_handlers_to_functions(idx: CodeIndex) -> Dict[str, List[Endpoint]]:
     for ep in idx.koa_endpoints:
         for h in ep.handlers:
             mapping[h].append(ep)
-    # dedupe per handler
     for k in list(mapping.keys()):
         mapping[k] = uniq_endpoints(mapping[k])
     return mapping
@@ -555,7 +543,44 @@ def backtrace_to_endpoints(
     return results
 
 
-# ----------------------------------- CLI --------------------------------------
+class StreamingOut:
+    def __init__(self, json_mode: bool):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.cwd = os.getcwd()
+        self.json_mode = json_mode
+        if json_mode:
+            self.ndjson_path = os.path.join(self.cwd, f"proc_trace_{ts}.ndjson")
+            self.final_json_path = os.path.join(self.cwd, f"proc_trace_{ts}.json")
+            self.log_path = None
+            self.f = open(self.ndjson_path, "w", encoding="utf-8")
+        else:
+            self.log_path = os.path.join(self.cwd, f"proc_trace_{ts}.log")
+            self.ndjson_path = None
+            self.final_json_path = None
+            self.f = open(self.log_path, "w", encoding="utf-8")
+
+    def write_human(self, s: str):
+        assert not self.json_mode
+        sys.stdout.write(s)
+        self.f.write(s)
+        self.f.flush()
+        sys.stdout.flush()
+
+    def write_ndjson_obj(self, obj: dict):
+        assert self.json_mode
+        self.f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        self.f.flush()
+
+    def write_final_json(self, obj: dict):
+        assert self.json_mode
+        with open(self.final_json_path, "w", encoding="utf-8") as jf:
+            json.dump(obj, jf, indent=2, ensure_ascii=False)
+
+    def close(self):
+        try:
+            self.f.close()
+        except Exception:
+            pass
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -604,7 +629,6 @@ def main(argv=None) -> int:
             return 2
     if not procs:
         print("[i] No procs specified. Scanning for all CALL <proc> usages...")
-        # fallback: a regex that matches any CALL <name>
         dynamic_procs = set()
         call_any = re.compile(
             r"\bCALL\s+(?:`?[A-Za-z0-9_]+`?\.)?`?([A-Za-z0-9_]+)`?", re.IGNORECASE
@@ -626,6 +650,16 @@ def main(argv=None) -> int:
             return 1
 
     exts = tuple(ns.ext)
+
+    out = StreamingOut(json_mode=ns.json)
+
+    if not ns.json:
+        header = []
+        header.append("=" * 100 + "\n")
+        header.append(f"Root: {absnorm(ns.root)}\n")
+        header.append(f"Procedures: {', '.join(procs)}\n")
+        header.append("=" * 100 + "\n")
+        out.write_human("".join(header))
 
     idx = CodeIndex()
     for path in walk_files(ns.root, exts):
@@ -659,6 +693,9 @@ def main(argv=None) -> int:
     gv_edges: List[Tuple[str, str]] = []
     gv_func_endpoints: Dict[str, List[str]] = defaultdict(list)
 
+    if not usages and not ns.json:
+        out.write_human("No stored procedure usages found.\n")
+
     for u in usages:
         file = u["file"]
         pos = u["pos"]
@@ -681,53 +718,49 @@ def main(argv=None) -> int:
                     }
                 )
 
-        report.append(
-            {
-                "procedure": u["proc"],
-                "file": file,
-                "line": u["line"],
-                "snippet": u["snippet"],
-                "enclosing_function": fdef.fqname() if fdef else None,
-                "function_file": fdef.file if fdef else None,
-                "traces": chains,
-            }
-        )
+        rec = {
+            "procedure": u["proc"],
+            "file": file,
+            "line": u["line"],
+            "snippet": u["snippet"],
+            "enclosing_function": fdef.fqname() if fdef else None,
+            "function_file": fdef.file if fdef else None,
+            "traces": chains,
+        }
+        report.append(rec)
+
+        if ns.json:
+            out.write_ndjson_obj(rec)
+        else:
+            sec = []
+            sec.append(f"\nPROC: {rec['procedure']}\n")
+            sec.append(f"File: {rec['file']}:{rec['line']}\n")
+            sec.append(f"Line: {rec['snippet']}\n")
+            sec.append(
+                f"Enclosing function: {rec['enclosing_function'] or '(not found)'}\n"
+            )
+            if rec["traces"]:
+                for t in rec["traces"]:
+                    chain = "  ←  ".join(t["call_chain"])
+                    sec.append("  Call chain:\n")
+                    sec.append(f"    {chain}\n")
+                    if t["endpoints"]:
+                        sec.append("  Endpoints:\n")
+                        for ep in t["endpoints"]:
+                            sec.append(f"    - {ep}\n")
+                    else:
+                        sec.append("  Endpoints: (none resolved)\n")
+            else:
+                sec.append("  (no callers / endpoints resolved)\n")
+            sec.append("-" * 100 + "\n")
+            out.write_human("".join(sec))
 
     if ns.json:
-        print(
-            json.dumps(
-                {"root": absnorm(ns.root), "procedures": procs, "results": report},
-                indent=2,
-            )
-        )
-    else:
-        if not report:
-            print("No stored procedure usages found.")
-            return 1
-        print("=" * 100)
-        print(f"Root: {absnorm(ns.root)}")
-        print(f"Procedures: {', '.join(procs)}")
-        print("=" * 100)
-        for r in report:
-            print(f"\nPROC: {r['procedure']}")
-            print(f"File: {r['file']}:{r['line']}")
-            print(f"Line: {r['snippet']}")
-            print(f"Enclosing function: {r['enclosing_function'] or '(not found)'}")
-            if r["traces"]:
-                for t in r["traces"]:
-                    chain = "  ←  ".join(t["call_chain"])
-                    print("  Call chain:")
-                    print(f"    {chain}")
-                    if t["endpoints"]:
-                        print("  Endpoints:")
-                        for ep in t["endpoints"]:
-                            print(f"    - {ep}")
-                    else:
-                        print("  Endpoints: (none resolved)")
-            else:
-                print("  (no callers / endpoints resolved)")
-            print("-" * 100)
+        final = {"root": absnorm(ns.root), "procedures": procs, "results": report}
+        out.write_final_json(final)
+        print(json.dumps(final, indent=2))
 
+    out.close()
     return 0
 
 
