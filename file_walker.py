@@ -32,10 +32,15 @@ def read_text(path: str) -> Optional[str]:
     return None
 
 
+IGNORE_DIRS = {".git", ".bin", ".build", "node_modules", "dist", "__pycache__"}
+
+
 def walk_files(root: str, exts: Tuple[str, ...]) -> List[str]:
     root = absnorm(root)
     out = []
-    for dp, _, fns in os.walk(root):
+    for dp, dn, fns in os.walk(root):
+        # prune ignored directories
+        dn[:] = [d for d in dn if d not in IGNORE_DIRS]
         for fn in fns:
             if not exts or fn.lower().endswith(exts):
                 out.append(absnorm(os.path.join(dp, fn)))
