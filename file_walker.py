@@ -7,6 +7,7 @@ import sys
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Set, Tuple
 from datetime import datetime
+import time
 
 FILE_EXT_DEFAULT = (".ts", ".tsx", ".js", ".jsx")
 
@@ -490,6 +491,9 @@ def build_caller_map(idx: "CodeIndex") -> Dict[str, Set[str]]:
 
     all_names = list(idx.functions_by_name.keys())
 
+    files_done = 0
+    next_ping = time.time() + 1.5
+
     for file, funcs in idx.functions_by_file.items():
         code = texts.get(file, "")
         if not code:
@@ -504,7 +508,8 @@ def build_caller_map(idx: "CodeIndex") -> Dict[str, Set[str]]:
         cand_names = [n for n in all_names if f"{n}(" in code]
         if not cand_names:
             continue
-        func_bodies = [(f, code[f.start : f.end]) for f in funcs]
+
+        func_bodies = [(fdef, code[fdef.start : fdef.end]) for fdef in funcs]
 
         for fdef, body in func_bodies:
             body_cands = [n for n in cand_names if f"{n}(" in body]
@@ -514,6 +519,15 @@ def build_caller_map(idx: "CodeIndex") -> Dict[str, Set[str]]:
                 if call_pattern(name).search(body):
                     for d in idx.functions_by_name[name]:
                         result[name].add(fdef.fqname())
+
+        files_done += 1
+        if time.time() >= next_ping:
+            print(
+                f"[progress] caller map: processed {files_done} files",
+                file=sys.stderr,
+                flush=True,
+            )
+            next_ping = time.time() + 1.5
 
     return result
 
@@ -739,11 +753,21 @@ def main(argv=None) -> int:
     if not usages and not ns.json:
         out.write_human("No stored procedure usages found.\n")
 
+    processed = 0
+    next_ping = time.time() + 1.0
+
     for u in usages:
         file = u["file"]
         pos = u["pos"]
         fdef = find_enclosing_function(idx, file, pos)
         chains: List[Dict[str, List[str]]] = []
+
+        if ns.debug:
+            print(
+                f"[trace] start: {u['proc']} @ {file}:{u['line']}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         if fdef:
             traces = backtrace_to_endpoints(
@@ -799,6 +823,14 @@ def main(argv=None) -> int:
             sec.append("-" * 100 + "\n")
             out.write_human("".join(sec))
 
+        processed += 1
+        if time.time() >= next_ping:
+            print(
+                f"[progress] traced {processed}/{len(usages)} proc usages",
+                file=sys.stderr,
+                flush=True,
+            )
+            next_ping = time.time() + 1.0
     if ns.json:
         final = {"root": absnorm(ns.root), "procedures": procs, "results": report}
         out.write_final_json(final)
