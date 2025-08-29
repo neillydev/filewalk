@@ -277,16 +277,33 @@ class CodeIndex:
             pos = pos2
 
     def finalize_calls(self):
-        names = list(self.functions_by_name.keys())
         texts: Dict[str, str] = {}
         for f in self.functions_by_file.keys():
             t = read_text(f)
             if t is not None:
                 texts[f] = t
+
+        all_names = list(self.functions_by_name.keys())
+
         for f, funcs in self.functions_by_file.items():
             code = texts.get(f, "")
-            for name in names:
-                for m in call_pattern(name).finditer(code):
+            if not code:
+                continue
+
+            if len(code) > 2_000_000 or (
+                code
+                and max((len(line) for line in code.splitlines()[:2000]), default=0)
+                > 5000
+            ):
+                continue
+
+            cand_names = [n for n in all_names if f"{n}(" in code]
+            if not cand_names:
+                continue
+
+            for name in cand_names:
+                pat = call_pattern(name)
+                for m in pat.finditer(code):
                     self.calls_by_file[f][name].append(m.start())
 
     def _approx_block_end(self, code: str, start: int) -> int:
@@ -462,16 +479,42 @@ def find_enclosing_function(
     return best
 
 
-def build_caller_map(idx: CodeIndex) -> Dict[str, Set[str]]:
+def build_caller_map(idx: "CodeIndex") -> Dict[str, Set[str]]:
     result: Dict[str, Set[str]] = defaultdict(set)
+
+    texts: Dict[str, str] = {}
+    for f in idx.functions_by_file.keys():
+        t = read_text(f)
+        if t is not None:
+            texts[f] = t
+
+    all_names = list(idx.functions_by_name.keys())
+
     for file, funcs in idx.functions_by_file.items():
-        code = read_text(file) or ""
-        for f in funcs:
-            body = code[f.start : f.end]
-            for name, defs in idx.functions_by_name.items():
+        code = texts.get(file, "")
+        if not code:
+            continue
+
+        if len(code) > 2_000_000 or (
+            code
+            and max((len(line) for line in code.splitlines()[:2000]), default=0) > 5000
+        ):
+            continue
+
+        cand_names = [n for n in all_names if f"{n}(" in code]
+        if not cand_names:
+            continue
+        func_bodies = [(f, code[f.start : f.end]) for f in funcs]
+
+        for fdef, body in func_bodies:
+            body_cands = [n for n in cand_names if f"{n}(" in body]
+            if not body_cands:
+                continue
+            for name in body_cands:
                 if call_pattern(name).search(body):
-                    for d in defs:
-                        result[name].add(f.fqname())
+                    for d in idx.functions_by_name[name]:
+                        result[name].add(fdef.fqname())
+
     return result
 
 
@@ -731,7 +774,7 @@ def main(argv=None) -> int:
         report.append(rec)
 
         if ns.json:
-            out.write_ndjson_obj(rec)  # stream JSON record
+            out.write_ndjson_obj(rec)
         else:
             sec = []
             sec.append(f"\nPROC: {rec['procedure']}\n")
