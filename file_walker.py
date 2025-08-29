@@ -11,6 +11,12 @@ import time
 
 FILE_EXT_DEFAULT = (".ts", ".tsx", ".js", ".jsx")
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 
 def absnorm(p: str) -> str:
     return os.path.normpath(os.path.abspath(p))
@@ -277,7 +283,7 @@ class CodeIndex:
                 pos2 = foll.end()
             pos = pos2
 
-    def finalize_calls(self):
+    def finalize_calls(self, progress=None):
         texts: Dict[str, str] = {}
         for f in self.functions_by_file.keys():
             t = read_text(f)
@@ -285,6 +291,7 @@ class CodeIndex:
                 texts[f] = t
 
         all_names = list(self.functions_by_name.keys())
+        files_done = 0
 
         for f, funcs in self.functions_by_file.items():
             code = texts.get(f, "")
@@ -296,16 +303,22 @@ class CodeIndex:
                 and max((len(line) for line in code.splitlines()[:2000]), default=0)
                 > 5000
             ):
+                files_done += 1
+                if progress and files_done % 25 == 0:
+                    progress(
+                        f"finalize_calls: {files_done} files (skipped large {os.path.basename(f)})"
+                    )
                 continue
 
             cand_names = [n for n in all_names if f"{n}(" in code]
-            if not cand_names:
-                continue
-
             for name in cand_names:
                 pat = call_pattern(name)
                 for m in pat.finditer(code):
                     self.calls_by_file[f][name].append(m.start())
+
+            files_done += 1
+            if progress and files_done % 25 == 0:
+                progress(f"finalize_calls: {files_done} files")
 
     def _approx_block_end(self, code: str, start: int) -> int:
         n = len(code)
@@ -480,7 +493,7 @@ def find_enclosing_function(
     return best
 
 
-def build_caller_map(idx: "CodeIndex") -> Dict[str, Set[str]]:
+def build_caller_map(idx: "CodeIndex", progress=None) -> Dict[str, Set[str]]:
     result: Dict[str, Set[str]] = defaultdict(set)
 
     texts: Dict[str, str] = {}
@@ -490,44 +503,45 @@ def build_caller_map(idx: "CodeIndex") -> Dict[str, Set[str]]:
             texts[f] = t
 
     all_names = list(idx.functions_by_name.keys())
-
     files_done = 0
-    next_ping = time.time() + 1.5
 
     for file, funcs in idx.functions_by_file.items():
         code = texts.get(file, "")
         if not code:
+            files_done += 1
+            if progress and files_done % 25 == 0:
+                progress(f"caller_map: {files_done} files (empty)")
             continue
 
         if len(code) > 2_000_000 or (
             code
             and max((len(line) for line in code.splitlines()[:2000]), default=0) > 5000
         ):
+            files_done += 1
+            if progress and files_done % 25 == 0:
+                progress(
+                    f"caller_map: {files_done} files (skipped large {os.path.basename(file)})"
+                )
             continue
 
         cand_names = [n for n in all_names if f"{n}(" in code]
         if not cand_names:
+            files_done += 1
+            if progress and files_done % 25 == 0:
+                progress(f"caller_map: {files_done} files")
             continue
 
-        func_bodies = [(fdef, code[fdef.start : fdef.end]) for fdef in funcs]
-
-        for fdef, body in func_bodies:
+        bodies = [(fdef, code[fdef.start : fdef.end]) for fdef in funcs]
+        for fdef, body in bodies:
             body_cands = [n for n in cand_names if f"{n}(" in body]
-            if not body_cands:
-                continue
             for name in body_cands:
                 if call_pattern(name).search(body):
                     for d in idx.functions_by_name[name]:
                         result[name].add(fdef.fqname())
 
         files_done += 1
-        if time.time() >= next_ping:
-            print(
-                f"[progress] caller map: processed {files_done} files",
-                file=sys.stderr,
-                flush=True,
-            )
-            next_ping = time.time() + 1.5
+        if progress and files_done % 25 == 0:
+            progress(f"caller_map: {files_done} files")
 
     return result
 
@@ -598,6 +612,20 @@ def backtrace_to_endpoints(
                 queue.append((chain + [caller_fq], cdef))
 
     return results
+
+
+def make_progress(out, also_stderr=True):
+    def _p(msg: str):
+        s = f"[progress] {msg}\n"
+        if out and not out.json_mode:
+            out.write_human(s)
+        elif out and out.json_mode:
+            out.write_ndjson_obj({"progress": msg})
+        if also_stderr:
+            sys.stderr.write(s)
+            sys.stderr.flush()
+
+    return _p
 
 
 class StreamingOut:
@@ -709,7 +737,7 @@ def main(argv=None) -> int:
     exts = tuple(ns.ext)
 
     out = StreamingOut(json_mode=ns.json)
-
+    progress = make_progress(out)
     if not ns.json:
         header = []
         header.append("=" * 100 + "\n")
@@ -719,12 +747,15 @@ def main(argv=None) -> int:
         out.write_human("".join(header))
 
     idx = CodeIndex()
+    progress("indexing files...")
     for path in walk_files(ns.root, exts):
         code = read_text(path)
         if code is None:
             continue
         idx.index_file(path, code)
-    idx.finalize_calls()
+    progress("finalize_calls start")
+    idx.finalize_calls(progress=progress)
+    progress("finalize_calls done")
     if ns.debug:
         total_funcs = sum(len(v) for v in idx.functions_by_file.values())
         print(
@@ -743,7 +774,9 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
 
-    caller_map = build_caller_map(idx)
+    progress("building caller_map start")
+    caller_map = build_caller_map(idx, progress=progress)
+    progress("building caller_map done")
     handler_map = match_handlers_to_functions(idx)
 
     report: List[Dict] = []
@@ -754,20 +787,13 @@ def main(argv=None) -> int:
         out.write_human("No stored procedure usages found.\n")
 
     processed = 0
-    next_ping = time.time() + 1.0
+    total = len(usages)
 
     for u in usages:
         file = u["file"]
         pos = u["pos"]
         fdef = find_enclosing_function(idx, file, pos)
         chains: List[Dict[str, List[str]]] = []
-
-        if ns.debug:
-            print(
-                f"[trace] start: {u['proc']} @ {file}:{u['line']}",
-                file=sys.stderr,
-                flush=True,
-            )
 
         if fdef:
             traces = backtrace_to_endpoints(
@@ -824,13 +850,9 @@ def main(argv=None) -> int:
             out.write_human("".join(sec))
 
         processed += 1
-        if time.time() >= next_ping:
-            print(
-                f"[progress] traced {processed}/{len(usages)} proc usages",
-                file=sys.stderr,
-                flush=True,
-            )
-            next_ping = time.time() + 1.0
+        if processed % 10 == 0:
+            progress(f"traced {processed}/{total} proc usages")
+
     if ns.json:
         final = {"root": absnorm(ns.root), "procedures": procs, "results": report}
         out.write_final_json(final)
