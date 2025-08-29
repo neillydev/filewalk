@@ -602,11 +602,27 @@ def main(argv=None) -> int:
             print(f"[ERR] failed to read {ns.procs_file}: {e}", file=sys.stderr)
             return 2
     if not procs:
-        print(
-            "[ERR] Provide at least one stored procedure via --procs or --procs-file",
-            file=sys.stderr,
+        print("[i] No procs specified. Scanning for all CALL <proc> usages...")
+        # fallback: a regex that matches any CALL <name>
+        dynamic_procs = set()
+        call_any = re.compile(
+            r"\bCALL\s+(?:`?[A-Za-z0-9_]+`?\.)?`?([A-Za-z0-9_]+)`?", re.IGNORECASE
         )
-        return 2
+        for path in walk_files(ns.root, tuple(ns.ext)):
+            code = read_text(path)
+            if not code:
+                continue
+            for s, e, q in find_string_spans(code):
+                frag = code[s:e]
+                for m in call_any.finditer(frag):
+                    dynamic_procs.add(m.group(1))
+        procs = list(dynamic_procs)
+        if not procs:
+            print(
+                "[ERR] No stored procedure calls found in the codebase.",
+                file=sys.stderr,
+            )
+            return 1
 
     exts = tuple(ns.ext)
 
