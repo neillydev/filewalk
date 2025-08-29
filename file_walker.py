@@ -100,6 +100,24 @@ def find_string_spans(code: str) -> List[Tuple[int, int, str]]:
     return spans
 
 
+# object literal assigned to a variable: const X = { ... }
+RE_OBJ_LIT_ASSIGN = re.compile(
+    r"(?:const|let|var)\s+(?P<var>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*\{",
+    re.MULTILINE,
+)
+
+# property arrow:   key: async (...) => { ... }
+RE_OBJ_PROP_ARROW = re.compile(
+    r"(?P<key>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s*)?\([^()]*\)\s*(?::\s*[^=(){;]+)?\s*=>",
+    re.MULTILINE,
+)
+
+# shorthand method: key(...) { ... }
+RE_OBJ_PROP_METHOD = re.compile(
+    r"(?P<key>[A-Za-z_$][A-Za-z0-9_$]*)\s*\([^()]*\)\s*\{",
+    re.MULTILINE,
+)
+
 RE_FUNC_DECL = re.compile(
     r"(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z0-9_$]+)\s*\(", re.MULTILINE
 )
@@ -150,7 +168,10 @@ RE_KOA_CHAIN_FOLLOW = re.compile(
 
 
 def call_pattern(name: str) -> re.Pattern:
-    return re.compile(rf"\b{re.escape(name)}\s*\(", re.MULTILINE)
+    return re.compile(
+        rf"(?:\b{re.escape(name)}\s*\(|\b[A-Za-z_$][A-Za-z0-9_$]*\.{re.escape(name)}\s*\()",
+        re.MULTILINE,
+    )
 
 
 class FunctionDef:
@@ -238,6 +259,28 @@ class CodeIndex:
                 self.functions_by_file[path].append(fd)
                 self.functions_by_name[name].append(fd)
 
+        for ma in RE_OBJ_LIT_ASSIGN.finditer(code):
+            varname = ma.group("var")
+            start_obj = ma.end()
+            end_obj = self._approx_block_end(code, start_obj)
+            obj_block = code[start_obj:end_obj]
+            base = start_obj
+
+            for mm in RE_OBJ_PROP_ARROW.finditer(obj_block):
+                key = mm.group("key")
+                s = base + mm.start()
+                e = base + self._approx_block_end(code, base + mm.end())
+                fd = FunctionDef(key, path, s, e, cls=varname)
+                self.functions_by_file[path].append(fd)
+                self.functions_by_name[key].append(fd)
+
+            for mm in RE_OBJ_PROP_METHOD.finditer(obj_block):
+                key = mm.group("key")
+                s = base + mm.start()
+                e = base + self._approx_block_end(code, base + mm.end())
+                fd = FunctionDef(key, path, s, e, cls=varname)
+                self.functions_by_file[path].append(fd)
+                self.functions_by_name[key].append(fd)
         prefixes = self.router_prefixes_by_file.get(path, {})
         for mk in RE_KOA_ROUTE_CALL.finditer(code):
             method = mk.group("method").upper()
